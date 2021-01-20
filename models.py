@@ -16,13 +16,26 @@ __all__ = [
     'deit_base_distilled_patch16_384',
 ]
 
+from fast_transformer import Block
+
 
 class DistilledVisionTransformer(VisionTransformer):
     def __init__(self, *args, **kwargs):
+        kwargs['depth'] = 12
+        kwargs['qk_scale'] = None
+        kwargs['attn_drop_rate'] = 0.
         super().__init__(*args, **kwargs)
+
+        dpr = [x.item() for x in torch.linspace(0, kwargs['drop_path_rate'], kwargs['depth'])]  # stochastic depth decay rule
+        self.blocks = nn.ModuleList([
+            Block(
+                dim=kwargs['embed_dim'], num_heads=kwargs['num_heads'], mlp_ratio=kwargs['mlp_ratio'], qkv_bias=kwargs['qkv_bias'], qk_scale=kwargs['qk_scale'],
+                drop=kwargs['drop_rate'], attn_drop=kwargs['attn_drop_rate'], drop_path=dpr[i], norm_layer=kwargs['norm_layer'])
+            for i in range(kwargs['depth'])])
+
         self.dist_token = nn.Parameter(torch.zeros(1, 1, self.embed_dim))
         num_patches = self.patch_embed.num_patches
-        self.pos_embed = nn.Parameter(torch.zeros(1, num_patches + 2, self.embed_dim))
+        self.pos_embed = nn.Parameter(torch.zeros(1, num_patches + 1, self.embed_dim)) #TODO: num_patches + 2 for distillation token
         self.head_dist = nn.Linear(self.embed_dim, self.num_classes) if self.num_classes > 0 else nn.Identity()
 
         trunc_normal_(self.dist_token, std=.02)
@@ -37,7 +50,7 @@ class DistilledVisionTransformer(VisionTransformer):
 
         cls_tokens = self.cls_token.expand(B, -1, -1)  # stole cls_tokens impl from Phil Wang, thanks
         dist_token = self.dist_token.expand(B, -1, -1)
-        x = torch.cat((cls_tokens, dist_token, x), dim=1)
+        x = torch.cat((cls_tokens, x), dim=1) #@TODO: distillation token decision
 
         x = x + self.pos_embed
         x = self.pos_drop(x)

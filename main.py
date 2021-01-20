@@ -7,6 +7,7 @@ import time
 import torch
 import torch.backends.cudnn as cudnn
 import json
+import os
 
 from pathlib import Path
 
@@ -172,7 +173,7 @@ def main(args):
     utils.init_distributed_mode(args)
 
     print(args)
-
+    os.environ["CUDA_VISIBLE_DEVICES"] = "1"
     if args.distillation_type != 'none' and args.finetune and not args.eval:
         raise NotImplementedError("Finetuning with distillation not yet supported")
 
@@ -267,13 +268,13 @@ def main(args):
         num_patches = model.patch_embed.num_patches
         num_extra_tokens = model.pos_embed.shape[-2] - num_patches
         # height (== width) for the checkpoint position embedding
-        orig_size = int((pos_embed_checkpoint.shape[-2] - num_extra_tokens) ** 0.5)
+        orig_size = int((pos_embed_checkpoint.shape[-2] - num_extra_tokens -1) ** 0.5) #TODO: distillation token
         # height (== width) for the new position embedding
         new_size = int(num_patches ** 0.5)
         # class_token and dist_token are kept unchanged
         extra_tokens = pos_embed_checkpoint[:, :num_extra_tokens]
         # only the position tokens are interpolated
-        pos_tokens = pos_embed_checkpoint[:, num_extra_tokens:]
+        pos_tokens = pos_embed_checkpoint[:, num_extra_tokens+1:] #TODO: distillation token
         pos_tokens = pos_tokens.reshape(-1, orig_size, orig_size, embedding_size).permute(0, 3, 1, 2)
         pos_tokens = torch.nn.functional.interpolate(
             pos_tokens, size=(new_size, new_size), mode='bicubic', align_corners=False)

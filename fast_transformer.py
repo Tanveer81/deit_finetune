@@ -26,7 +26,7 @@ def merge_last(x, n_dims):
     return x.view(*s[:-n_dims], -1)
 
 class Attention(nn.Module):
-    def __init__(self, dim, num_heads=8, qkv_bias=False, qk_scale=None, attn_drop=0., proj_drop=0., feature_type='classical', compute_type='ps'):
+    def __init__(self, dim, num_heads=8, qkv_bias=False, qk_scale=None, attn_drop=0., proj_drop=0., feature_type='favor+', compute_type='ps'):
         super().__init__()
         self.num_heads = num_heads
         self._hidden_dim = dim // num_heads
@@ -57,7 +57,6 @@ class Attention(nn.Module):
             return x
 
         if self._feature_type == 'favor+':
-
             queries, keys, values = self._get_queries_keys_values(x, self.sample_rfs(x.device))
 
             num_sums, den_sums = self.init_sums(x.device)

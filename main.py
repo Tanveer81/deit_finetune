@@ -34,7 +34,7 @@ def get_args_parser():
     # Model parameters
     parser.add_argument('--model', default='deit_base_patch16_224', type=str, metavar='MODEL',
                         help='Name of model to train')
-    parser.add_argument('--input-size', default=224, type=int, help='images input size')
+    parser.add_argument('--input_size', default=224, type=int, help='images input size')
 
     parser.add_argument('--drop', type=float, default=0.0, metavar='PCT',
                         help='Dropout rate (default: 0.)')
@@ -155,7 +155,7 @@ def get_args_parser():
                         help='start epoch')
     parser.add_argument('--eval', action='store_true', help='Perform evaluation only')
     parser.add_argument('--dist-eval', action='store_true', default=False, help='Enabling distributed evaluation')
-    parser.add_argument('--num_workers', default=10, type=int)
+    parser.add_argument('--num_workers', default=0, type=int)
     parser.add_argument('--pin-mem', action='store_true',
                         help='Pin CPU memory in DataLoader for more efficient (sometimes) transfer to GPU.')
     parser.add_argument('--no-pin-mem', action='store_false', dest='pin_mem',
@@ -227,7 +227,7 @@ def main(args):
         batch_size=int(1.5 * args.batch_size),
         num_workers=args.num_workers,
         pin_memory=args.pin_mem,
-        drop_last=False
+        drop_last=False,
     )
 
     mixup_fn = None
@@ -246,6 +246,7 @@ def main(args):
         drop_rate=args.drop,
         drop_path_rate=args.drop_path,
         drop_block_rate=None,
+        image_size=args.input_size
     )
 
     if args.finetune:
@@ -268,13 +269,13 @@ def main(args):
         num_patches = model.patch_embed.num_patches
         num_extra_tokens = model.pos_embed.shape[-2] - num_patches
         # height (== width) for the checkpoint position embedding
-        orig_size = int((pos_embed_checkpoint.shape[-2] - num_extra_tokens -1) ** 0.5) #TODO: distillation token
+        orig_size = int((pos_embed_checkpoint.shape[-2] - num_extra_tokens) ** 0.5) #TODO: distillation token
         # height (== width) for the new position embedding
         new_size = int(num_patches ** 0.5)
         # class_token and dist_token are kept unchanged
         extra_tokens = pos_embed_checkpoint[:, :num_extra_tokens]
         # only the position tokens are interpolated
-        pos_tokens = pos_embed_checkpoint[:, num_extra_tokens+1:] #TODO: distillation token
+        pos_tokens = pos_embed_checkpoint[:, num_extra_tokens:] #TODO: distillation token
         pos_tokens = pos_tokens.reshape(-1, orig_size, orig_size, embedding_size).permute(0, 3, 1, 2)
         pos_tokens = torch.nn.functional.interpolate(
             pos_tokens, size=(new_size, new_size), mode='bicubic', align_corners=False)

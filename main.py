@@ -46,6 +46,7 @@ def get_args_parser():
     parser.set_defaults(model_ema=True)
     parser.add_argument('--model-ema-decay', type=float, default=0.99996, help='')
     parser.add_argument('--model-ema-force-cpu', action='store_true', default=False, help='')
+    parser.add_argument('--attention_type', default='classical', type=str, choices = ['classical', 'favor+', 'linear'])
 
     # Optimizer parameters
     parser.add_argument('--opt', default='adamw', type=str, metavar='OPTIMIZER',
@@ -246,7 +247,8 @@ def main(args):
         drop_rate=args.drop,
         drop_path_rate=args.drop_path,
         drop_block_rate=None,
-        image_size=args.input_size
+        image_size=args.input_size,
+        attention_type=args.attention_type
     )
 
     if args.finetune:

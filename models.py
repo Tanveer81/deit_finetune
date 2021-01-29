@@ -26,12 +26,14 @@ class DistilledVisionTransformer(VisionTransformer):
         kwargs['attn_drop_rate'] = 0.
         super().__init__(*args, **kwargs)
 
-        dpr = [x.item() for x in torch.linspace(0, kwargs['drop_path_rate'], kwargs['depth'])]  # stochastic depth decay rule
-        self.blocks = nn.ModuleList([
-            Block(
-                dim=kwargs['embed_dim'], num_heads=kwargs['num_heads'], mlp_ratio=kwargs['mlp_ratio'], qkv_bias=kwargs['qkv_bias'], qk_scale=kwargs['qk_scale'],
-                drop=kwargs['drop_rate'], attn_drop=kwargs['attn_drop_rate'], drop_path=dpr[i], norm_layer=kwargs['norm_layer'])
-            for i in range(kwargs['depth'])])
+        if kwargs['attention_type'] != 'classical':
+            dpr = [x.item() for x in torch.linspace(0, kwargs['drop_path_rate'], kwargs['depth'])]  # stochastic depth decay rule
+            self.blocks = nn.ModuleList([
+                Block(
+                    dim=kwargs['embed_dim'], num_heads=kwargs['num_heads'], mlp_ratio=kwargs['mlp_ratio'], qkv_bias=kwargs['qkv_bias'], qk_scale=kwargs['qk_scale'],
+                    drop=kwargs['drop_rate'], attn_drop=kwargs['attn_drop_rate'], drop_path=dpr[i], norm_layer=kwargs['norm_layer'],attention_type = kwargs['attention_type'])
+                for i in range(kwargs['depth'])])
+
 
         self.dist_token = nn.Parameter(torch.zeros(1, 1, self.embed_dim))
         num_patches = self.patch_embed.num_patches
@@ -70,6 +72,32 @@ class DistilledVisionTransformer(VisionTransformer):
         else:
             # during inference, return the average of both classifier predictions
             return (x + x_dist) / 2
+
+
+class CustomVisionTransformer(VisionTransformer):
+    def __init__(self, *args, **kwargs):
+        kwargs['depth'] = 12
+        kwargs['qk_scale'] = None
+        kwargs['attn_drop_rate'] = 0.
+        attention_type = kwargs.pop('attention_type')
+        super().__init__(*args, **kwargs)
+
+        if attention_type != 'classical':
+            dpr = [x.item() for x in torch.linspace(0, kwargs['drop_path_rate'], kwargs['depth'])]  # stochastic depth decay rule
+            self.blocks = nn.ModuleList([
+                Block(
+                    dim=kwargs['embed_dim'], num_heads=kwargs['num_heads'], mlp_ratio=kwargs['mlp_ratio'], qkv_bias=kwargs['qkv_bias'], qk_scale=kwargs['qk_scale'],
+                    drop=kwargs['drop_rate'], attn_drop=kwargs['attn_drop_rate'], drop_path=dpr[i], norm_layer=kwargs['norm_layer'],attention_type=attention_type)
+                for i in range(kwargs['depth'])])
+
+        # self.dist_token = nn.Parameter(torch.zeros(1, 1, self.embed_dim))
+        # num_patches = self.patch_embed.num_patches
+        # self.pos_embed = nn.Parameter(torch.zeros(1, num_patches + 1, self.embed_dim)) #TODO: num_patches + 2 for distillation token
+        # self.head_dist = nn.Linear(self.embed_dim, self.num_classes) if self.num_classes > 0 else nn.Identity()
+        #
+        # trunc_normal_(self.dist_token, std=.02)
+        # trunc_normal_(self.pos_embed, std=.02)
+        # self.head_dist.apply(self._init_weights)
 
 
 @register_model
@@ -165,7 +193,7 @@ def deit_base_distilled_patch16_224(pretrained=False, **kwargs):
 @register_model
 def deit_base_patch16_384(pretrained=False, **kwargs):
     img_size = kwargs.pop('image_size')
-    model = VisionTransformer(
+    model = CustomVisionTransformer(
         img_size=img_size, patch_size=16, embed_dim=768, depth=12, num_heads=12, mlp_ratio=4, qkv_bias=True,
         norm_layer=partial(nn.LayerNorm, eps=1e-6), **kwargs)
     model.default_cfg = _cfg()

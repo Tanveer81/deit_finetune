@@ -41,7 +41,8 @@ class Attention(nn.Module):
         self.proj_drop = nn.Dropout(proj_drop)
         self._feature_type = _feature_type
         self._compute_type = compute_type
-        
+        # feature_map: callable, a callable that applies the feature map
+        # to the last dimension of a tensor (default: elu(x)+1) -> same as paper
         if _feature_type == 'linear':
             self.attn = LinearAttention(dim, feature_map=None, eps=1e-06, event_dispatcher='')
 

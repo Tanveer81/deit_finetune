@@ -41,6 +41,7 @@ class Attention(nn.Module):
         self.proj_drop = nn.Dropout(proj_drop)
         self._feature_type = _feature_type
         self._compute_type = compute_type
+        
         if _feature_type == 'linear':
             self.attn = LinearAttention(dim, feature_map=None, eps=1e-06, event_dispatcher='')
 
@@ -66,7 +67,10 @@ class Attention(nn.Module):
             q, k, v = qkv[0], qkv[1], qkv[2]   # make torchscript happy (cannot use tensor as tuple)
             # how many queries each sequence in the batch consists of
             length_mask = LengthMask(x.new_full((B,), N, dtype=torch.int64))
+            # where each query attend to, we set it to all/ full mask
             attn_mask = FullMask(N, device=x.device)
+            # last two length_mask are for query and key length, which are equal in this case
+            # for cross attention they would be different
             x = self.attn(q, k, v, attn_mask, length_mask, length_mask)
             x = x.view(B, N, -1) # torch.Size([2, 197, 768])
             x = self.proj(x)

@@ -26,6 +26,8 @@ class DistilledVisionTransformer(VisionTransformer):
         kwargs['attn_drop_rate'] = 0.
         super().__init__(*args, **kwargs)
 
+        # If classical full attention then no need to alter default vision transformer
+        # Else replace the attention with custom ones
         if kwargs['attention_type'] != 'classical':
             dpr = [x.item() for x in torch.linspace(0, kwargs['drop_path_rate'], kwargs['depth'])]  # stochastic depth decay rule
             self.blocks = nn.ModuleList([
@@ -33,7 +35,6 @@ class DistilledVisionTransformer(VisionTransformer):
                     dim=kwargs['embed_dim'], num_heads=kwargs['num_heads'], mlp_ratio=kwargs['mlp_ratio'], qkv_bias=kwargs['qkv_bias'], qk_scale=kwargs['qk_scale'],
                     drop=kwargs['drop_rate'], attn_drop=kwargs['attn_drop_rate'], drop_path=dpr[i], norm_layer=kwargs['norm_layer'],attention_type = kwargs['attention_type'])
                 for i in range(kwargs['depth'])])
-
 
         self.dist_token = nn.Parameter(torch.zeros(1, 1, self.embed_dim))
         num_patches = self.patch_embed.num_patches
@@ -82,6 +83,8 @@ class CustomVisionTransformer(VisionTransformer):
         attention_type = kwargs.pop('attention_type')
         super().__init__(*args, **kwargs)
 
+        # If classical full attention then no need to alter default vision transformer
+        # Else replace the attention with custom ones
         if attention_type != 'classical':
             dpr = [x.item() for x in torch.linspace(0, kwargs['drop_path_rate'], kwargs['depth'])]  # stochastic depth decay rule
             self.blocks = nn.ModuleList([
@@ -89,15 +92,6 @@ class CustomVisionTransformer(VisionTransformer):
                     dim=kwargs['embed_dim'], num_heads=kwargs['num_heads'], mlp_ratio=kwargs['mlp_ratio'], qkv_bias=kwargs['qkv_bias'], qk_scale=kwargs['qk_scale'],
                     drop=kwargs['drop_rate'], attn_drop=kwargs['attn_drop_rate'], drop_path=dpr[i], norm_layer=kwargs['norm_layer'],attention_type=attention_type)
                 for i in range(kwargs['depth'])])
-
-        # self.dist_token = nn.Parameter(torch.zeros(1, 1, self.embed_dim))
-        # num_patches = self.patch_embed.num_patches
-        # self.pos_embed = nn.Parameter(torch.zeros(1, num_patches + 1, self.embed_dim)) #TODO: num_patches + 2 for distillation token
-        # self.head_dist = nn.Linear(self.embed_dim, self.num_classes) if self.num_classes > 0 else nn.Identity()
-        #
-        # trunc_normal_(self.dist_token, std=.02)
-        # trunc_normal_(self.pos_embed, std=.02)
-        # self.head_dist.apply(self._init_weights)
 
 
 @register_model

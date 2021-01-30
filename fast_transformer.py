@@ -8,7 +8,8 @@ from torch import nn
 from torch import Tensor 
 from torch.nn import functional as F
 import numerator_and_denominator as num_and_den
-
+from fast_transformers.attention.linear_attention import LinearAttention
+from fast_transformers.masking import LengthMask, FullMask
 
 def split_last(x, shape):
     "split the last dimension to given shape"
@@ -40,6 +41,8 @@ class Attention(nn.Module):
         self.proj_drop = nn.Dropout(proj_drop)
         self._feature_type = _feature_type
         self._compute_type = compute_type
+        if _feature_type == 'linear':
+            self.attn = LinearAttention(dim, feature_map=None, eps=1e-06, event_dispatcher='')
 
     def forward(self, x):
         if self._feature_type == 'classical':
@@ -57,15 +60,15 @@ class Attention(nn.Module):
             return x
 
         elif self._feature_type == 'linear':
-            B, N, C = x.shape
-            qkv = self.qkv(x).reshape(B, N, 3, self.num_heads, C // self.num_heads).permute(2, 0, 3, 1, 4)
+            B, N, C = x.shape # 2, 197, 768 batch sequence d_model
+            # Changed permutation ordering to make compatible with linear attention library
+            qkv = self.qkv(x).reshape(B, N, 3, self.num_heads, C // self.num_heads).permute(2, 0, 1, 3, 4)
             q, k, v = qkv[0], qkv[1], qkv[2]   # make torchscript happy (cannot use tensor as tuple)
-
-            # attn = (q @ k.transpose(-2, -1)) * self.scale
-            # attn = attn.softmax(dim=-1)
-            # attn = self.attn_drop(attn)
-            #
-            # x = (attn @ v).transpose(1, 2).reshape(B, N, C)
+            # how many queries each sequence in the batch consists of
+            length_mask = LengthMask(x.new_full((B,), N, dtype=torch.int64))
+            attn_mask = FullMask(N, device=x.device)
+            x = self.attn(q, k, v, attn_mask, length_mask, length_mask)
+            x = x.view(B, N, -1) # torch.Size([2, 197, 768])
             x = self.proj(x)
             x = self.proj_drop(x)
             return x

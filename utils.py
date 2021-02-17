@@ -168,6 +168,48 @@ def _load_checkpoint_for_ema(model_ema, checkpoint):
     mem_file.seek(0)
     model_ema._load_checkpoint(mem_file)
 
+def _load_all_vit_variant(model, checkpoint, strict=False, deit=True):
+    if not deit: # for rest of variant of ViT
+        num_layers_model = 12 #int([n for (n, p) in model.blocks.named_parameters()][-1].split('.')[0]) + 1
+        # num_layers_state_dict = int((len(checkpoint['state_dict']) - 8) / 16)
+        # if num_layers_model != num_layers_state_dict:
+        #     raise ValueError(
+        #         f'Pretrained model has different number of layers: {num_layers_state_dict} than defined models layers: {num_layers_model}')
+        # rename model as per deit
+        checkpoint['cls_token'] = checkpoint.pop('cls_token')
+        checkpoint['pos_embed'] = checkpoint.pop('transformer.pos_embedding.pos_embedding')
+        checkpoint['patch_embed.proj.weight'] = checkpoint.pop('embedding.weight')
+        checkpoint['patch_embed.proj.bias'] = checkpoint.pop('embedding.bias')
+        checkpoint['head.weight'] = checkpoint.pop('classifier.weight')
+        checkpoint['head.bias'] = checkpoint.pop('classifier.bias')
+        checkpoint['norm.weight'] = checkpoint.pop('transformer.norm.weight')
+        checkpoint['norm.bias'] = checkpoint.pop('transformer.norm.bias')
+
+        for i in range(num_layers_model):
+            q_w = checkpoint.pop(f'transformer.encoder_layers.{i}.attn.query.weight')
+            q_b = checkpoint.pop(f'transformer.encoder_layers.{i}.attn.query.bias')
+            k_w = checkpoint.pop(f'transformer.encoder_layers.{i}.attn.key.weight')
+            k_b = checkpoint.pop(f'transformer.encoder_layers.{i}.attn.key.bias')
+            v_w = checkpoint.pop(f'transformer.encoder_layers.{i}.attn.value.weight')
+            v_b = checkpoint.pop(f'transformer.encoder_layers.{i}.attn.value.bias')
+            qkv_b = torch.stack([q_b, k_b, v_b], dim=0).view(3,-1).view(-1)
+            qkv_w = torch.cat([q_w, k_w, v_w]).view(3*model.embed_dim, model.embed_dim)
+            checkpoint[f'blocks.{i}.attn.qkv.weight'] = qkv_w#.permute(1, 0, 2).reshape(-1, model.embed_dim)
+            checkpoint[f'blocks.{i}.attn.qkv.bias'] = qkv_b #.permute(1, 0, 2).reshape(-1)
+            checkpoint[f'blocks.{i}.mlp.fc1.weight'] = checkpoint.pop(f'transformer.encoder_layers.{i}.mlp.fc1.weight')
+            checkpoint[f'blocks.{i}.mlp.fc1.bias'] = checkpoint.pop(f'transformer.encoder_layers.{i}.mlp.fc1.bias')
+            checkpoint[f'blocks.{i}.mlp.fc2.weight'] = checkpoint.pop(f'transformer.encoder_layers.{i}.mlp.fc2.weight')
+            checkpoint[f'blocks.{i}.mlp.fc2.bias'] = checkpoint.pop(f'transformer.encoder_layers.{i}.mlp.fc2.bias')
+            proj_weight = checkpoint.pop(f'transformer.encoder_layers.{i}.attn.out.weight')
+            checkpoint[f'blocks.{i}.attn.proj.weight'] = proj_weight.reshape(-1, model.num_features)
+            checkpoint[f'blocks.{i}.attn.proj.bias'] = checkpoint.pop(f'transformer.encoder_layers.{i}.attn.out.bias')
+            checkpoint[f'blocks.{i}.norm1.weight'] = checkpoint.pop(f'transformer.encoder_layers.{i}.norm1.weight')
+            checkpoint[f'blocks.{i}.norm1.bias'] = checkpoint.pop(f'transformer.encoder_layers.{i}.norm1.bias')
+            checkpoint[f'blocks.{i}.norm2.weight'] = checkpoint.pop(f'transformer.encoder_layers.{i}.norm2.weight')
+            checkpoint[f'blocks.{i}.norm2.bias'] = checkpoint.pop(f'transformer.encoder_layers.{i}.norm2.bias')
+    # now load model
+    model.load_state_dict(checkpoint)
+
 
 def setup_for_distributed(is_master):
     """

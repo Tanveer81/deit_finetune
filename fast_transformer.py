@@ -27,27 +27,35 @@ def merge_last(x, n_dims):
     return x.view(*s[:-n_dims], -1)
 
 class Attention(nn.Module):
-    def __init__(self, dim, num_heads=8, qkv_bias=False, qk_scale=None, attn_drop=0., proj_drop=0., _feature_type='favor+', compute_type='iter'):
+    def __init__(self, dim, num_heads=8, qkv_bias=False, qk_scale=None, attn_drop=0., proj_drop=0., attention_type='nystrom', seq_len=2048, num_landmarks=256, kernel_size=33):
         super().__init__()
         self.num_heads = num_heads
         self._hidden_dim = dim // num_heads
-        head_dim = dim // num_heads
+        self.head_dim = dim // num_heads
         # NOTE scale factor was wrong in my original version, can set manually to be compat with prev weights
-        self.scale = qk_scale or head_dim ** -0.5
+        self.scale = qk_scale or self.head_dim ** -0.5
 
         self.qkv = nn.Linear(dim, dim * 3, bias=qkv_bias)
         self.attn_drop = nn.Dropout(attn_drop)
         self.proj = nn.Linear(dim, dim)
         self.proj_drop = nn.Dropout(proj_drop)
-        self._feature_type = _feature_type
-        self._compute_type = compute_type
+        self.attention_type = attention_type
         # feature_map: callable, a callable that applies the feature map
         # to the last dimension of a tensor (default: elu(x)+1) -> same as paper
-        if _feature_type == 'linear':
+        if attention_type == 'linear':
             self.attn = LinearAttention(dim, feature_map=None, eps=1e-06, event_dispatcher='')
 
+        if attention_type == 'nystrom':
+            self.seq_len = seq_len
+            self.num_landmarks = num_landmarks
+            self.conv = nn.Conv2d(
+                in_channels = self.num_heads, out_channels = self.num_heads,
+                kernel_size = (kernel_size, 1), padding = (kernel_size // 2, 0),
+                bias = False,
+                groups = self.num_heads)
+
     def forward(self, x):
-        if self._feature_type == 'classical':
+        if self.attention_type == 'classical':
             B, N, C = x.shape
             qkv = self.qkv(x).reshape(B, N, 3, self.num_heads, C // self.num_heads).permute(2, 0, 3, 1, 4)
             q, k, v = qkv[0], qkv[1], qkv[2]   # make torchscript happy (cannot use tensor as tuple)
@@ -61,7 +69,7 @@ class Attention(nn.Module):
             x = self.proj_drop(x)
             return x
 
-        elif self._feature_type == 'linear':
+        elif self.attention_type == 'linear': # transformer are RNNs
             B, N, C = x.shape # 2, 197, 768 batch sequence d_model
             # Changed permutation ordering to make compatible with linear attention library
             qkv = self.qkv(x).reshape(B, N, 3, self.num_heads, C // self.num_heads).permute(2, 0, 1, 3, 4)
@@ -78,363 +86,32 @@ class Attention(nn.Module):
             x = self.proj_drop(x)
             return x
 
-        if self._feature_type == 'favor+':
-            queries, keys, values = self._get_queries_keys_values(x, self.sample_rfs(x.device))
+        elif self.attention_type == 'nystrom':  # Nystromformer
+            B, N, C = x.shape
+            qkv = self.qkv(x).reshape(B, N, 3, self.num_heads, C // self.num_heads).permute(2, 0, 3, 1, 4)
+            Q, K, V = qkv[0]/self.scale, qkv[1]/self.scale, qkv[2]  # make torchscript happy (cannot use tensor as tuple)
+
+            Q_landmarks = torch.cat((Q[...,0:1,:], Q[...,1:,:].reshape(-1, self.num_heads, self.num_landmarks, self.seq_len // self.num_landmarks, self.head_dim).mean(dim = -2)), 2)
+            K_landmarks = torch.cat((K[...,0:1,:], K[...,1:,:].reshape(-1, self.num_heads, self.num_landmarks, self.seq_len // self.num_landmarks, self.head_dim).mean(dim = -2)), 2)
+
+            kernel_1 = F.softmax(torch.matmul(Q, K_landmarks.transpose(-1, -2)), dim = -1)
+            kernel_2 = F.softmax(torch.matmul(Q_landmarks, K_landmarks.transpose(-1, -2)), dim = -1)
+            kernel_3 = F.softmax(torch.matmul(Q_landmarks, K.transpose(-1, -2)) , dim = -1)
+            X = torch.matmul(torch.matmul(kernel_1, self.iterative_inv(kernel_2)), torch.matmul(kernel_3, V))
+
+            X += self.conv(V) # TODO: this may be optional according to the Nystrom paper
+
+            return X.permute(0,2,1,3).reshape(B,N,C)
+
+    def iterative_inv(self, mat, n_iter = 6):
+        I = torch.eye(mat.size(-1), device = mat.device)
+        K = mat
+        V = 1 / (torch.max(torch.sum(torch.abs(K), dim = -2)) * torch.max(torch.sum(torch.abs(K), dim = -1))) * K.transpose(-1, -2)
+        for _ in range(n_iter):
+            KV = torch.matmul(K, V)
+            V = torch.matmul(0.25 * V, 13 * I - torch.matmul(KV, 15 * I - torch.matmul(KV, 7 * I - KV)))
+        return V
 
-            num_sums, den_sums = self.init_sums(x.device)
-
-            if self._compute_type == 'iter':
-                num, _ = num_and_den.num_iter(queries, keys, values, num_sums)
-                den, _ = num_and_den.den_iter(queries, keys, den_sums)
-            elif self._compute_type == 'ps':
-                num, _ = num_and_den.num_ps(queries, keys, values, num_sums, False)
-                den, _ = num_and_den.den_ps(queries, keys, den_sums, False)
-            else:
-                num, _ = num_and_den.num_ps(queries, keys, values, num_sums, True)
-                den, _ = num_and_den.den_ps(queries, keys, den_sums, True)
-
-            num = torch.transpose(num, 0, 1)
-            den = torch.transpose(den, 0, 1)
-
-            outputs = num / (den[Ellipsis, None] + 1e-16)
-            outputs = outputs.reshape(x.shape)
-
-            return outputs
-
-    def init_sums(self, device):
-
-        head_dim = self._hidden_dim
-
-        if self._feature_type.startswith('favor+_'):
-            splitted = self._feature_type.split('_')
-            feature_dim = int(splitted[1]) * head_dim
-        else:
-            feature_dim = head_dim
-
-        num_sums = torch.zeros([1, self.num_heads, feature_dim, head_dim],
-                            device=device)
-        den_sums = torch.zeros([1, self.num_heads, feature_dim], device=device)
-
-        return num_sums, den_sums
-
-    def incr_step(self, x, num_sums, den_sums, on_forward, rfs, on_start):
-
-        queries, keys, values = self._get_queries_keys_values(x, rfs)
-
-        if not on_forward:
-
-            if on_start:
-                num_sums = torch.zeros_like(num_sums)
-                den_sums = torch.zeros_like(den_sums)
-            elif self._compute_type == 'iter':
-                num_sums = num_and_den.num_reverse_sums_iter(queries, keys, values,
-                                                                num_sums)
-                den_sums = num_and_den.den_reverse_sums_iter(queries, keys, den_sums)
-            else:
-                num_sums = num_and_den.num_reverse_sums_ps(queries, keys, values,
-                                                            num_sums)
-                den_sums = num_and_den.den_reverse_sums_ps(queries, keys, den_sums)
-
-            num_sums = num_sums.detach().clone()
-            num_sums.requires_grad = True
-            den_sums = den_sums.detach().clone()
-            den_sums.requires_grad = True
-
-            init_num_sums = num_sums
-            init_den_sums = den_sums
-
-        if self._compute_type == 'iter':
-            num, num_sums = num_and_den.num_iter(queries, keys, values, num_sums)
-            den, den_sums = num_and_den.den_iter(queries, keys, den_sums)
-        elif self._compute_type == 'ps':
-            num, num_sums = num_and_den.num_ps(queries, keys, values, num_sums, False)
-            den, den_sums = num_and_den.den_ps(queries, keys, den_sums, False)
-        else:
-            num, num_sums = num_and_den.num_ps(queries, keys, values, num_sums, True)
-            den, den_sums = num_and_den.den_ps(queries, keys, den_sums, True)
-
-        num = torch.transpose(num, 0, 1)
-        den = torch.transpose(den, 0, 1)
-
-        outputs = num / (den[Ellipsis, None] + 1e-16)
-        outputs = outputs.reshape(x.shape)
-
-        if on_forward:
-            return outputs, num_sums, den_sums
-
-        return outputs, init_num_sums, init_den_sums, num_sums, den_sums
-
-    def _get_queries_keys_values(self, inputs, rfs):
-
-        # queries = self.proj_q(inputs)
-        # keys = self.proj_k(inputs)
-        # values = self.proj_v(inputs)
-        B, N, C = inputs.shape
-        qkv = self.qkv(inputs)
-        qkv = qkv.reshape(B, N, 3, C).permute(2, 0, 1, 3)
-        queries, keys, values = qkv[0], qkv[1], qkv[2]  # make torchscript happy (cannot use tensor as tuple)
-
-        queries = queries.reshape([queries.shape[0], queries.shape[1], self.num_heads, -1])
-        keys = keys.reshape([keys.shape[0], keys.shape[1], self.num_heads, -1])
-        values = values.reshape([values.shape[0], values.shape[1], self.num_heads, -1])
-
-        if self._feature_type == 'relu':
-            queries = torch.nn.functional.relu(queries)
-            keys = torch.nn.functional.relu(keys)
-        elif self._feature_type == 'elu+1':
-            queries = torch.nn.functional.elu(queries) + 1
-            keys = torch.nn.functional.elu(keys) + 1
-        elif self._feature_type == 'sqr':
-            queries = queries**2
-            keys = keys**2
-        elif self._feature_type == 'abs':
-            queries = torch.abs(queries)
-            keys = torch.abs(keys)
-        else:
-            head_dim = self._hidden_dim
-
-            queries = queries * np.power(head_dim, -0.25)
-            queries = torch.einsum('ijkl,klm->ijkm', queries, rfs) - (queries**2).sum(3, keepdim=True) / 2
-            queries = torch.exp(queries)
-
-            keys = keys * np.power(head_dim, -0.25)
-            keys = torch.einsum('ijkl,klm->ijkm', keys, rfs) - (keys**2).sum(
-                3, keepdim=True) / 2
-            keys = torch.exp(keys)
-
-        queries = queries.transpose(0, 1)
-        keys = keys.transpose(0, 1)
-        values = values.transpose(0, 1)
-
-        return queries, keys, values
-
-    def sample_rfs(self, device):
-
-        if not self._feature_type.startswith('favor+'):
-            return None
-
-        if self._feature_type == 'favor+':
-            factor = 1
-        else:
-            splitted = self._feature_type.split('_')
-            factor = int(splitted[1])
-
-        head_dim = self._hidden_dim
-
-        rfs = [[
-            _sample_orth_matrix(head_dim, device)[None, Ellipsis] for _ in range(factor)
-        ] for _ in range(self.num_heads)]
-        rfs = [torch.cat(x, 2) for x in rfs]
-        rfs = torch.cat(rfs, 0)
-        rfs = rfs * np.sqrt(head_dim)
-
-        return rfs
-
-class MultiHeadedSelfAttention(nn.Module):
-    """Multi-Headed Dot Product Attention"""
-    def __init__(self, dim, num_heads, dropout, feature_type='favor+', compute_type='iter'):
-        super().__init__()
-        self.proj_q = nn.Linear(dim, dim)
-        self.proj_k = nn.Linear(dim, dim)
-        self.proj_v = nn.Linear(dim, dim)
-        self.drop = nn.Dropout(dropout)
-        self._n_heads = num_heads
-        self._hidden_dim = dim
-        self._feature_type = feature_type
-        self._compute_type = compute_type
-        self.scores = None # for visualization
-
-    def forward(self, x, mask):
-        """
-        x, q(query), k(key), v(value) : (B(batch_size), S(seq_len), D(dim))
-        mask : (B(batch_size) x S(seq_len))
-        * split D(dim) into (H(_n_heads), W(width of head)) ; D = H * W
-        """
-        if self._feature_type == 'classical':
-            # (B, S, D) -proj-> (B, S, D) -split-> (B, S, H, W) -trans-> (B, H, S, W)
-            q, k, v = self.proj_q(x), self.proj_k(x), self.proj_v(x)
-            q, k, v = (split_last(x, (self._n_heads, -1)).transpose(1, 2) for x in [q, k, v])
-            # (B, H, S, W) @ (B, H, W, S) -> (B, H, S, S) -softmax-> (B, H, S, S)
-            scores = q @ k.transpose(-2, -1) / np.sqrt(k.size(-1))
-            if mask is not None:
-                mask = mask[:, None, None, :].float()
-                scores -= 10000.0 * (1.0 - mask)
-            scores = self.drop(F.softmax(scores, dim=-1))
-            # (B, H, S, S) @ (B, H, S, W) -> (B, H, S, W) -trans-> (B, S, H, W)
-            h = (scores @ v).transpose(1, 2).contiguous()
-            # -merge-> (B, S, D)
-            h = merge_last(h, 2)
-            self.scores = scores
-            return h
-
-        # fast linear attention layer
-        if self._feature_type == 'favor+':
-
-            queries, keys, values = self._get_queries_keys_values(x, self.sample_rfs(x.device))
-
-            num_sums, den_sums = self.init_sums(x.device)
-
-            if self._compute_type == 'iter':
-                num, _ = num_and_den.num_iter(queries, keys, values, num_sums)
-                den, _ = num_and_den.den_iter(queries, keys, den_sums)
-            elif self._compute_type == 'ps':
-                num, _ = num_and_den.num_ps(queries, keys, values, num_sums, False)
-                den, _ = num_and_den.den_ps(queries, keys, den_sums, False)
-            else:
-                num, _ = num_and_den.num_ps(queries, keys, values, num_sums, True)
-                den, _ = num_and_den.den_ps(queries, keys, den_sums, True)
-
-            num = torch.transpose(num, 0, 1)
-            den = torch.transpose(den, 0, 1)
-
-            outputs = num / (den[Ellipsis, None] + 1e-16)
-            outputs = outputs.reshape(x.shape)
-
-            return outputs
-
-    def init_sums(self, device):
-
-        head_dim = self._hidden_dim
-
-        if self._feature_type.startswith('favor+_'):
-            splitted = self._feature_type.split('_')
-            feature_dim = int(splitted[1]) * head_dim
-        else:
-            feature_dim = head_dim
-
-        num_sums = torch.zeros([1, self._n_heads, feature_dim, head_dim],
-                            device=device)
-        den_sums = torch.zeros([1, self._n_heads, feature_dim], device=device)
-
-        return num_sums, den_sums
-
-    def incr_step(self, x, num_sums, den_sums, on_forward, rfs, on_start):
-
-        queries, keys, values = self._get_queries_keys_values(x, rfs)
-
-        if not on_forward:
-
-            if on_start:
-                num_sums = torch.zeros_like(num_sums)
-                den_sums = torch.zeros_like(den_sums)
-            elif self._compute_type == 'iter':
-                num_sums = num_and_den.num_reverse_sums_iter(queries, keys, values,
-                                                                num_sums)
-                den_sums = num_and_den.den_reverse_sums_iter(queries, keys, den_sums)
-            else:
-                num_sums = num_and_den.num_reverse_sums_ps(queries, keys, values,
-                                                            num_sums)
-                den_sums = num_and_den.den_reverse_sums_ps(queries, keys, den_sums)
-
-            num_sums = num_sums.detach().clone()
-            num_sums.requires_grad = True
-            den_sums = den_sums.detach().clone()
-            den_sums.requires_grad = True
-
-            init_num_sums = num_sums
-            init_den_sums = den_sums
-
-        if self._compute_type == 'iter':
-            num, num_sums = num_and_den.num_iter(queries, keys, values, num_sums)
-            den, den_sums = num_and_den.den_iter(queries, keys, den_sums)
-        elif self._compute_type == 'ps':
-            num, num_sums = num_and_den.num_ps(queries, keys, values, num_sums, False)
-            den, den_sums = num_and_den.den_ps(queries, keys, den_sums, False)
-        else:
-            num, num_sums = num_and_den.num_ps(queries, keys, values, num_sums, True)
-            den, den_sums = num_and_den.den_ps(queries, keys, den_sums, True)
-
-        num = torch.transpose(num, 0, 1)
-        den = torch.transpose(den, 0, 1)
-
-        outputs = num / (den[Ellipsis, None] + 1e-16)
-        outputs = outputs.reshape(x.shape)
-
-        if on_forward:
-            return outputs, num_sums, den_sums
-
-        return outputs, init_num_sums, init_den_sums, num_sums, den_sums
-
-    def _get_queries_keys_values(self, inputs, rfs):
-
-        queries = self.proj_q(inputs)
-        keys = self.proj_k(inputs)
-        values = self.proj_v(inputs)
-
-        queries = queries.reshape(
-            [queries.shape[0], queries.shape[1], self._n_heads, -1])
-        keys = keys.reshape([keys.shape[0], keys.shape[1], self._n_heads, -1])
-        values = values.reshape(
-            [values.shape[0], values.shape[1], self._n_heads, -1])
-
-        if self._feature_type == 'relu':
-            queries = torch.nn.functional.relu(queries)
-            keys = torch.nn.functional.relu(keys)
-        elif self._feature_type == 'elu+1':
-            queries = torch.nn.functional.elu(queries) + 1
-            keys = torch.nn.functional.elu(keys) + 1
-        elif self._feature_type == 'sqr':
-            queries = queries**2
-            keys = keys**2
-        elif self._feature_type == 'abs':
-            queries = torch.abs(queries)
-            keys = torch.abs(keys)
-        else:
-
-            head_dim = self._hidden_dim
-
-            queries = queries * np.power(head_dim, -0.25)
-            queries = torch.einsum('ijkl,klm->ijkm', queries, rfs) - (queries**2).sum(
-                3, keepdim=True) / 2
-            queries = torch.exp(queries)
-
-            keys = keys * np.power(head_dim, -0.25)
-            keys = torch.einsum('ijkl,klm->ijkm', keys, rfs) - (keys**2).sum(
-                3, keepdim=True) / 2
-            keys = torch.exp(keys)
-
-        queries = queries.transpose(0, 1)
-        keys = keys.transpose(0, 1)
-        values = values.transpose(0, 1)
-
-        return queries, keys, values
-
-    def sample_rfs(self, device):
-
-        if not self._feature_type.startswith('favor+'):
-            return None
-
-        if self._feature_type == 'favor+':
-            factor = 1
-        else:
-            splitted = self._feature_type.split('_')
-            factor = int(splitted[1])
-
-        head_dim = self._hidden_dim
-
-        rfs = [[
-            _sample_orth_matrix(head_dim, device)[None, Ellipsis] for _ in range(factor)
-        ] for _ in range(self._n_heads)]
-        rfs = [torch.cat(x, 2) for x in rfs]
-        rfs = torch.cat(rfs, 0)
-        rfs = rfs * np.sqrt(head_dim)
-
-        return rfs
-
-def _sample_orth_matrix(size, device):
-    """Samples orthogonal matrix to reduce variance for random features."""
-    subspace = torch.randn(size, size, device=device)
-    subspace = torch.tril(subspace)
-    subspace = subspace / torch.sqrt((subspace**2).sum(0, keepdim=True))
-
-    S = torch.triu(subspace.T.mm(subspace)) - 0.5 * torch.eye(
-        subspace.shape[1], device=device)
-
-    result = torch.eye(
-        subspace.shape[0], device=device) - subspace.mm(torch.inverse(S)).mm(
-            subspace.T)
-
-    return result
 
 # From timm
 def drop_path(x, drop_prob: float = 0., training: bool = False):
@@ -490,10 +167,11 @@ class Mlp(nn.Module):
 class Block(nn.Module):
 
     def __init__(self, dim, num_heads, mlp_ratio=4., qkv_bias=False, qk_scale=None, drop=0., attn_drop=0.,
-                 drop_path=0., act_layer=nn.GELU, norm_layer=nn.LayerNorm, attention_type = 'favor+'):
+                 drop_path=0., act_layer=nn.GELU, norm_layer=nn.LayerNorm, attention_type='nystrom', seq_len=None, num_landmarks=None):
         super().__init__()
         self.norm1 = norm_layer(dim)
-        self.attn = Attention(dim, num_heads=num_heads, qkv_bias=qkv_bias, qk_scale=qk_scale, attn_drop=attn_drop, proj_drop=drop, _feature_type=attention_type)
+        self.attn = Attention(dim, num_heads=num_heads, qkv_bias=qkv_bias, qk_scale=qk_scale, attn_drop=attn_drop, proj_drop=drop, attention_type=attention_type,
+                              seq_len=seq_len, num_landmarks=num_landmarks)
         # self.attn = MultiHeadedSelfAttention(dim, num_heads, drop)
         # NOTE: drop path for stochastic depth, we shall see if this is better than dropout here
         self.drop_path = DropPath(drop_path) if drop_path > 0. else nn.Identity()

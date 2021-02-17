@@ -35,6 +35,7 @@ def get_args_parser():
     parser.add_argument('--model', default='deit_base_patch16_224', type=str, metavar='MODEL',
                         help='Name of model to train')
     parser.add_argument('--input_size', default=224, type=int, help='images input size')
+    parser.add_argument('--num_landmarks', default=192, type=int, help='landmark size')
 
     parser.add_argument('--drop', type=float, default=0.0, metavar='PCT',
                         help='Dropout rate (default: 0.)')
@@ -46,7 +47,7 @@ def get_args_parser():
     parser.set_defaults(model_ema=True)
     parser.add_argument('--model-ema-decay', type=float, default=0.99996, help='')
     parser.add_argument('--model-ema-force-cpu', action='store_true', default=False, help='')
-    parser.add_argument('--attention_type', default='classical', type=str, choices = ['classical', 'favor+', 'linear'])
+    parser.add_argument('--attention_type', default='classical', type=str, choices = ['classical', 'nystrom', 'linear'])
 
     # Optimizer parameters
     parser.add_argument('--opt', default='adamw', type=str, metavar='OPTIMIZER',
@@ -248,7 +249,9 @@ def main(args):
         drop_path_rate=args.drop_path,
         drop_block_rate=None,
         image_size=args.input_size,
-        attention_type=args.attention_type
+        attention_type=args.attention_type,
+        seq_len=int((args.input_size/16)**2),
+        num_landmarks=args.num_landmarks
     )
 
     if args.finetune:

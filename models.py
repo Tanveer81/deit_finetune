@@ -81,16 +81,26 @@ class CustomVisionTransformer(VisionTransformer):
         kwargs['qk_scale'] = None
         kwargs['attn_drop_rate'] = 0.
         attention_type = kwargs.pop('attention_type')
+        seq_len = kwargs.pop('seq_len')
+        num_landmarks = kwargs.pop('num_landmarks')
         super().__init__(*args, **kwargs)
 
         # If classical full attention then no need to alter default vision transformer
         # Else replace the attention with custom ones
-        if attention_type != 'classical':
+        if attention_type == 'nystrom':
             dpr = [x.item() for x in torch.linspace(0, kwargs['drop_path_rate'], kwargs['depth'])]  # stochastic depth decay rule
             self.blocks = nn.ModuleList([
                 Block(
                     dim=kwargs['embed_dim'], num_heads=kwargs['num_heads'], mlp_ratio=kwargs['mlp_ratio'], qkv_bias=kwargs['qkv_bias'], qk_scale=kwargs['qk_scale'],
-                    drop=kwargs['drop_rate'], attn_drop=kwargs['attn_drop_rate'], drop_path=dpr[i], norm_layer=kwargs['norm_layer'],attention_type=attention_type)
+                    drop=kwargs['drop_rate'], attn_drop=kwargs['attn_drop_rate'], drop_path=dpr[i], norm_layer=kwargs['norm_layer'], attention_type=attention_type,
+                    seq_len=seq_len, num_landmarks=num_landmarks)
+                for i in range(kwargs['depth'])])
+        elif attention_type != 'classical':
+            dpr = [x.item() for x in torch.linspace(0, kwargs['drop_path_rate'], kwargs['depth'])]  # stochastic depth decay rule
+            self.blocks = nn.ModuleList([
+                Block(
+                    dim=kwargs['embed_dim'], num_heads=kwargs['num_heads'], mlp_ratio=kwargs['mlp_ratio'], qkv_bias=kwargs['qkv_bias'], qk_scale=kwargs['qk_scale'],
+                    drop=kwargs['drop_rate'], attn_drop=kwargs['attn_drop_rate'], drop_path=dpr[i], norm_layer=kwargs['norm_layer'], attention_type=attention_type)
                 for i in range(kwargs['depth'])])
 
 
